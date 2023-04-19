@@ -4,162 +4,6 @@ import subprocess
 from molseqcollection_class import MolSeqCollection
 
 
-def peptides_to_mapped_aln_n_15mer(peptide_file, path, aln_files, all_accessions):
-    # read in peptide file
-    peptide_file_prefix = peptide_file.split('tsv')[0]
-    with open(peptide_file, 'r') as infile, \
-        open(peptide_file_prefix + 'mapped_aln_n_15mers.tsv', 'w') as outfile1, \
-        open(peptide_file_prefix + 'mapped_aln_matrix.tsv', 'w') as outfile2, \
-        open(peptide_file_prefix + 'mapped_15mer_matrix.tsv', 'w') as outfile3, \
-        open(peptide_file_prefix + 'mapped_aln_heatmap.tsv', 'w') as outfile4, \
-        open(peptide_file_prefix + 'mapped_15mer_heatmap.tsv', 'w') as outfile5:
-
-        count = 0
-        count_kmer = 0
-        count_kmer_len_eq_15 = 0
-        count_kmer_len_lt_15 = 0
-        count_kmer_len_gt_15 = 0
-
-        for line in infile:
-            line = line.strip()
-
-            if line:
-                if line.startswith('#'):
-                    # flat file
-                    outfile1.write(line + '\tMapped_taxon\tAln_coords\tAligned_epitope\tMapped_genome_accession\tAligned_target\tAln_score\tBest_15mer\tBest_15mer_score\tAln_file\n')
-
-                    # matrix files
-                    outfile2.write(line + '\t' + 'alpha\t' * 16 + 'beta\t' * 15 + 'sarbeco\t' * 10 + '\n')
-                    outfile2.write('\t\t\t\t\t\t\t\t\t' + '\t'.join(all_accessions) + '\n')
-                    outfile3.write(line + '\t' + 'alpha\t' * 16 + 'beta\t' * 15 + 'sarbeco\t' * 10 + '\n')
-                    outfile3.write('\t\t\t\t\t\t\t\t\t' + '\t'.join(all_accessions) + '\n')
-
-                    # heatmap files
-                    outfile4.write(line + '\talpha' * 16 + '\tbeta' * 15 + '\tsarbeco' * 10 + '\n')
-                    outfile4.write('\t\t\t\t\t\t\t\t\t' + '\t'.join(all_accessions) + '\t\n')
-                    outfile5.write(line + '\talpha' * 16 + '\tbeta' * 15 + '\tsarbeco' * 10 + '\n')
-                    outfile5.write('\t\t\t\t\t\t\t\t\t' + '\t'.join(all_accessions) + '\t\n')
-                else:
-                    # non-header lines
-                    CD4, Megapool, Start, Epitope_sequence, Peptide_ID, Num_times_tested, Num_times_positive, Total_magnitude, Genome_accession = line.split('\t')
-
-                    # clean sequence str
-                    Epitope_sequence.replace('\s', '')
-
-                    # get mapped aln files
-                    if Megapool.startswith('nsp'):
-                        mapped_files = aln_files[CD4 + '_orf1ab']
-                    else:
-                        mapped_files = aln_files[CD4 + '_' + Megapool]
-
-                    # each row/peptide_ID has 3 mapped aln files
-                    peptide_to_seqs_identities = {}
-                    for file in mapped_files:
-                        mapped_taxon = file.split('reps')[1].split('.')[1]
-
-                        # read in aln file
-                        mapped_aln_file = os.path.join(path, file)
-                        aln = MolSeqCollection.parse(mapped_aln_file, is_aligned=True, allow_duplicate_labels=False)
-                        mapped_aln_coords = aln.get_aln_coords_for_substring(seq_label=Genome_accession, query=Epitope_sequence)
-
-                        # get matched aln region
-                        if mapped_aln_coords != (-1, -1):
-                            print(mapped_aln_file)
-                            print(Genome_accession)
-                            mapped_aln_region = aln.get_region(mapped_aln_coords[0], mapped_aln_coords[1])
-                            aligned_epitope = mapped_aln_region.get_seqs_by_label_substring(delimiter='|', substring_index=2, label_list=[Genome_accession]).get_molseq_list()[0].get_seq()
-
-                            # get mapped sequence in each sequence in aln file
-                            for seq in mapped_aln_region.get_molseq_list():
-                                matched_label = seq.get_label()
-                                matched_accession = matched_label.split('|')[2]
-
-                                # exclude KX512809 which is missing orf1ab
-                                if 'KX512809' not in matched_label:
-                                    # get target seq
-                                    aligned_target = seq.get_seq()
-                                    aligned_target_full = aln.get_seqs_by_labels([matched_label]).get_molseq_list()[0].get_seq()
-                                    kmer_seed = seq.get_no_gap_seq()
-
-                                    # calculate alignment score
-                                    aln_score = calculate_aln_score(aligned_epitope, aligned_target)
-
-                                    # find best_15mer with max 15mer_score
-
-                                    if len(kmer_seed) == 15:
-                                        # case 1
-                                        # search space: kmer_seed
-                                        # best_15mer_left = 1
-                                        best_15mer_score = calculate_kmer_score(Epitope_sequence, kmer_seed)
-                                        best_15mer = kmer_seed
-                                        count_kmer_len_eq_15 += 1
-                                    elif len(kmer_seed) > 15:
-                                        # case 2
-                                        # search space: kmer_seed
-                                        best_15mer, best_15mer_score = find_best_15mer(Epitope_sequence, kmer_search_space=kmer_seed)
-                                        count_kmer_len_lt_15 += 1
-                                    else:
-                                        # case 3
-                                        # kmer_seed length < 15:
-                                        # search space: (15-k) padding + kmer_seed + (15-k) padding
-                                        # 0-based in str
-                                        kmer_search_space = find_kmer_search_space(aligned_target_full, mapped_aln_coords, kmer_seed, k=15)
-                                        best_15mer, best_15mer_score = find_best_15mer(Epitope_sequence, kmer_search_space)
-                                        count_kmer_len_gt_15 += 1
-
-                                    count_kmer += 1
-                                    # save seqs and identities to map
-                                    peptide_to_seqs_identities[matched_accession] = [aligned_target,
-                                                                                     best_15mer,
-                                                                                     aln_score,
-                                                                                     best_15mer_score]
-
-                                    outfile1.write(line + '\t' + mapped_taxon + '\t' + str(
-                                        mapped_aln_coords) + '\t' + aligned_epitope + '\t' + matched_accession + '\t' + aligned_target + '\t' + str(aln_score) + '\t' + best_15mer + '\t' + str(best_15mer_score) + '\t' + file + '\n')
-
-                        else:
-                            outfile1.write(line + '\t\t\t\t\t\t\t\t\n')
-
-                    # done with all files for this line
-                    values2 = ''
-                    values3 = ''
-                    values4 = ''
-                    values5 = ''
-                    for accession in all_accessions:
-                        if accession in peptide_to_seqs_identities.keys():
-                            # mapped aln seq
-                            values2 += '\t' + peptide_to_seqs_identities[accession][0]
-                            # 15-mer
-                            values3 += '\t' + peptide_to_seqs_identities[accession][1]
-
-                            if len(peptide_to_seqs_identities[accession][1]) < 15:
-                                print('< 15-mer', CD4, Megapool, Start, Epitope_sequence, Peptide_ID)
-
-                            # mapped aln seq identity
-                            values4 += '\t' + str(peptide_to_seqs_identities[accession][2])
-                            # 15-mer identity
-                            values5 += '\t' + str(peptide_to_seqs_identities[accession][3])
-                        else:
-                            values2 += '\t'
-                            values3 += '\t'
-                            values4 += '\t'
-                            values5 += '\t'
-
-                    outfile2.write(line + values2 + '\n')
-                    outfile3.write(line + values3 + '\n')
-                    outfile4.write(line + values4 + '\n')
-                    outfile5.write(line + values5 + '\n')
-
-                    # done with this line
-                    count += 1
-    print('# epitopes read    :', count)
-    print("# kmer_len_eq_15   :", count_kmer_len_eq_15)
-    print("# kmer_len_lt_15   :", count_kmer_len_lt_15)
-    print("# kmer_len_gt_15   :", count_kmer_len_gt_15)
-    print("# kmer             :", count_kmer)
-    return
-
-
 def peptides_to_mapped_aln_n_kmer(peptide_file, aln_files, all_accessions, mat_peptide=True):
     """
 
@@ -505,24 +349,6 @@ def find_best_kmer(epitope_sequence, kmer_search_space, k):
     return best_kmer, best_kmer_score
 
 
-def find_best_15mer(epitope_sequence, kmer_search_space):
-    # 0-based in str
-    left = 0
-    best_15mer_left = 0
-    best_15mer_score = 0
-    best_15mer = ""
-
-    while left + 14 < len(kmer_search_space):
-        curr_15mer_score = calculate_kmer_score(epitope_sequence, kmer_search_space[left: left + 15]) # str[left to right]
-        if curr_15mer_score > best_15mer_score:
-            best_15mer_score = curr_15mer_score
-            best_15mer_left = left
-        left += 1
-
-    best_15mer = kmer_search_space[best_15mer_left: best_15mer_left + 15]
-    return best_15mer, best_15mer_score
-
-
 def get_nsp_seq_strings(wuhan_mat_peptides_to_nsps, protein_file='/Users/yuzhang/OneDrive - J. Craig Venter Institute/2019nCov/LJI_Pan-Coronavirus_Vaccines/LJI_rep_viruses/reps_selected/Alphabetacoronavirus_Protein20210617.LJI_reps20210910.fasta',
                    accession='NC_045512'):
     wuhan_nsp_to_seq_str = {}
@@ -672,8 +498,6 @@ if __name__ == '__main__':
     beta = ['NC_019843', 'NC_038294', 'NC_003045', 'NC_006213', 'NC_006577', 'NC_039207', 'MK211374', 'MT121216', 'NC_009019', 'NC_009020', 'MT337386', 'KC869678', 'MG596802', 'HM211100', 'HM211101']
     sarbeco = ['NC_045512', 'MW636737', 'NC_004718', 'MT706389', 'MW868471', 'MT745698', 'MW731141', 'MW848086', 'MW725757', 'MT952134']
     all_accessions20210910 = alpha20210910 + beta + sarbeco
-    #peptides_to_mapped_aln_n_15mer(peptide_file, path, aln_files_einsi, all_accessions20210910)
-
 
     ########
     # append rep seq to other groups
@@ -684,7 +508,7 @@ if __name__ == '__main__':
         path + 'Alphabetacoronavirus_Protein20210617.metadata_filtered.orf1ab_passed_QC.plus_must_include.reps.beta.fasta',
         path + 'Alphabetacoronavirus_Protein20210617.metadata_filtered.orf1ab_passed_QC.plus_must_include.reps.sarbeco.fasta'
     ]
-    
+    '''
     protein_files = [
         path + 'Alphabetacoronavirus_Protein20210617.metadata_filtered.E_passed_QC.plus_must_include.reps.alpha.fasta',
         path + 'Alphabetacoronavirus_Protein20210617.metadata_filtered.E_passed_QC.plus_must_include.reps.beta.fasta',
@@ -708,7 +532,7 @@ if __name__ == '__main__':
         path + 'Alphabetacoronavirus_Protein20210617.metadata_filtered.S_passed_QC.plus_must_include.reps.beta.fasta',
         path + 'Alphabetacoronavirus_Protein20210617.metadata_filtered.S_passed_QC.plus_must_include.reps.sarbeco.fasta'
     ]
-    
+    '''
     # list of molseqcollection objects [alpha, beta, sarbeco]
     seqs_list = []
 
